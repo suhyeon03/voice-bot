@@ -1,0 +1,10 @@
+# 2단계 이후 (전처리·학습·생성) 의존성
+# demucs 4.0.1은 torchaudio 2.9+의 저장 방식 변경과 충돌할 수 있어 2.8 이하로 고정
+torch>=2.3,<2.9
+torchaudio>=2.3,<2.9
+demucs==4.0.1
+librosa>=0.10
+soundfile>=0.12
+pyloudnorm>=0.1.1
+scipy>=1.10
+python-dotenv>=1.0

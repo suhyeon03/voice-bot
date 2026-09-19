@@ -1,0 +1,28 @@
+# ⚠️ 개인 음성 데이터·모델·동의 기록은 절대 커밋하지 않기
+data/
+models/
+*.wav
+*.ogg
+*.opus
+*.m4a
+*.mp3
+*.flac
+*.pth
+*.index
+
+# 비밀값
+.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS / 에디터
+.DS_Store
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/extensions.json

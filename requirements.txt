@@ -1,0 +1,4 @@
+# 음성 채널 녹음(DAVE 복호화)은 아직 공식 릴리스에 없어서 개발 브랜치의 특정 커밋에 고정
+# (fix/voice-rec-2 @ 2026-09-05). 공식 버전에서 녹음이 고쳐지면 py-cord[voice]>=2.9 등으로 교체
+py-cord[voice] @ git+https://github.com/Pycord-Development/pycord.git@10a5e8cf13bd8db21f95baf62cf866056d1e1091
+python-dotenv>=1.0
