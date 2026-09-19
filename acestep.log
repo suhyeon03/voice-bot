@@ -12,16 +12,14 @@ API Documentation: http://127.0.0.1:8001/docs
 
 Starting ACE-Step API Server (MLX backend)...
 
-W0919 21:58:25.520000 16255 torch/distributed/elastic/multiprocessing/redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-2026-09-19 21:58:26.458 | WARNING  | acestep.training.trainer:<module>:40 - bitsandbytes not installed. Using standard AdamW.
-INFO:     Started server process [16255]
+W0920 01:14:27.527000 18707 torch/distributed/elastic/multiprocessing/redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+2026-09-20 01:14:28.508 | WARNING  | acestep.training.trainer:<module>:40 - bitsandbytes not installed. Using standard AdamW.
+INFO:     Started server process [18707]
 INFO:     Waiting for application startup.
-2026-09-19 21:58:26.583 | INFO     | acestep.gpu_config:get_gpu_config:846 - macOS MPS detected (16.0 GB unified memory, tier=tier6a). Applying Apple Silicon optimizations: no compile, no quantization, mlx backend, no CPU offload.
-2026-09-19 21:58:26.590 | INFO     | acestep.gpu_config:get_gpu_config:846 - macOS MPS detected (16.0 GB unified memory, tier=tier6a). Applying Apple Silicon optimizations: no compile, no quantization, mlx backend, no CPU offload.
+2026-09-20 01:14:28.649 | INFO     | acestep.gpu_config:get_gpu_config:846 - macOS MPS detected (16.0 GB unified memory, tier=tier6a). Applying Apple Silicon optimizations: no compile, no quantization, mlx backend, no CPU offload.
+2026-09-20 01:14:28.706 | INFO     | acestep.gpu_config:get_gpu_config:846 - macOS MPS detected (16.0 GB unified memory, tier=tier6a). Applying Apple Silicon optimizations: no compile, no quantization, mlx backend, no CPU offload.
 INFO:     Application startup complete.
-ERROR:    [Errno 48] error while attempting to bind on address ('127.0.0.1', 8001): address already in use
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
 
 ============================================================
 [API Server] GPU Configuration Detected:
@@ -39,52 +37,5 @@ INFO:     Application shutdown complete.
 [API Server] Models will be lazy-loaded on first request
 [API Server] Set ACESTEP_NO_INIT=false to load models at startup
 [API Server] Server is ready to accept requests (models not loaded yet)
-
-[Retry] Online dependency resolution failed, retrying in offline mode...
-
-W0919 21:58:28.828000 16264 torch/distributed/elastic/multiprocessing/redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
-2026-09-19 21:58:29.643 | WARNING  | acestep.training.trainer:<module>:40 - bitsandbytes not installed. Using standard AdamW.
-INFO:     Started server process [16264]
-INFO:     Waiting for application startup.
-2026-09-19 21:58:29.727 | INFO     | acestep.gpu_config:get_gpu_config:846 - macOS MPS detected (16.0 GB unified memory, tier=tier6a). Applying Apple Silicon optimizations: no compile, no quantization, mlx backend, no CPU offload.
-2026-09-19 21:58:29.732 | INFO     | acestep.gpu_config:get_gpu_config:846 - macOS MPS detected (16.0 GB unified memory, tier=tier6a). Applying Apple Silicon optimizations: no compile, no quantization, mlx backend, no CPU offload.
-INFO:     Application startup complete.
-ERROR:    [Errno 48] error while attempting to bind on address ('127.0.0.1', 8001): address already in use
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
-
-============================================================
-[API Server] GPU Configuration Detected:
-============================================================
-  GPU Memory: 16.00 GB
-  Configuration Tier: tier6a
-  Max Duration (with LM): 480s
-  Max Duration (without LM): 600s
-  Max Batch Size (with LM): 4
-  Max Batch Size (without LM): 8
-  Default LM Init: True
-  Available LM Models: ['acestep-5Hz-lm-0.6B', 'acestep-5Hz-lm-1.7B']
-============================================================
-
-[API Server] Models will be lazy-loaded on first request
-[API Server] Set ACESTEP_NO_INIT=false to load models at startup
-[API Server] Server is ready to accept requests (models not loaded yet)
-
-========================================
-[Error] Failed to start ACE-Step API Server
-========================================
-
-Both online and offINFO:     Shutting down
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
-INFO:     Finished server process [16188]
-
-========================================
-[Error] Failed to start ACE-Step API Server
-========================================
-
-Both online and offline modes failed.
-Please check:
-  1. Your internet connection (for first-time setup)
-  2. If dependencies were previously installed (offline mode requires a prior successful install)
-  3. Try running: uv sync --offline
+INFO:     127.0.0.1:57139 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57140 - "GET /health HTTP/1.1" 200 OK

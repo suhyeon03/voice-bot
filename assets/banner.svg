@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1b1033"/>
+      <stop offset="55%" stop-color="#2a1454"/>
+      <stop offset="100%" stop-color="#0d2a4a"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff8a3d"/>
+      <stop offset="50%" stop-color="#ff4f9a"/>
+      <stop offset="100%" stop-color="#7c5cff"/>
+    </linearGradient>
+    <linearGradient id="mic" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffb36b"/>
+      <stop offset="100%" stop-color="#ff4f9a"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="360" rx="24" fill="url(#bg)"/>
+
+  <!-- 은은한 별빛 -->
+  <g fill="#ffffff" opacity="0.35">
+    <circle cx="90" cy="60" r="1.6"/><circle cx="240" cy="300" r="1.2"/><circle cx="420" cy="40" r="1.4"/>
+    <circle cx="1180" cy="70" r="1.6"/><circle cx="1040" cy="310" r="1.2"/><circle cx="860" cy="30" r="1.1"/>
+    <circle cx="640" cy="330" r="1.3"/><circle cx="1230" cy="200" r="1.1"/>
+  </g>
+
+  <!-- 파형 막대 (마이크에서 퍼지는 소리) -->
+  <g fill="url(#wave)" opacity="0.9">
+    <rect x="300" y="150" width="10" height="60" rx="5"/>
+    <rect x="322" y="125" width="10" height="110" rx="5"/>
+    <rect x="344" y="160" width="10" height="40" rx="5"/>
+    <rect x="366" y="105" width="10" height="150" rx="5"/>
+    <rect x="388" y="138" width="10" height="84" rx="5"/>
+    <rect x="410" y="165" width="10" height="30" rx="5"/>
+    <rect x="432" y="120" width="10" height="120" rx="5"/>
+    <rect x="454" y="150" width="10" height="60" rx="5"/>
+  </g>
+
+  <!-- 마이크 -->
+  <g filter="url(#glow)">
+    <rect x="170" y="95" width="70" height="120" rx="35" fill="url(#mic)"/>
+    <g stroke="#1b1033" stroke-width="3" opacity="0.35">
+      <line x1="182" y1="130" x2="228" y2="130"/>
+      <line x1="182" y1="150" x2="228" y2="150"/>
+      <line x1="182" y1="170" x2="228" y2="170"/>
+    </g>
+    <path d="M150 175 a55 55 0 0 0 110 0" fill="none" stroke="#ffb36b" stroke-width="8" stroke-linecap="round"/>
+    <line x1="205" y1="230" x2="205" y2="262" stroke="#ffb36b" stroke-width="8" stroke-linecap="round"/>
+    <line x1="178" y1="265" x2="232" y2="265" stroke="#ffb36b" stroke-width="8" stroke-linecap="round"/>
+  </g>
+
+  <!-- 음표 -->
+  <g fill="#ffffff" opacity="0.85">
+    <ellipse cx="1110" cy="238" rx="18" ry="13" transform="rotate(-20 1110 238)"/>
+    <rect x="1124" y="130" width="6" height="108" rx="3"/>
+    <path d="M1130 130 q40 12 34 52 q-6 -24 -34 -28 z"/>
+    <ellipse cx="1030" cy="268" rx="13" ry="9.5" transform="rotate(-20 1030 268)" opacity="0.7"/>
+    <rect x="1040" y="195" width="4.5" height="73" rx="2" opacity="0.7"/>
+  </g>
+
+  <!-- 제목 -->
+  <text x="520" y="170" font-family="-apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Noto Sans CJK KR', sans-serif"
+        font-size="68" font-weight="800" fill="#ffffff" letter-spacing="1">Voice Bot</text>
+  <text x="522" y="222" font-family="-apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Noto Sans CJK KR', sans-serif"
+        font-size="26" font-weight="600" fill="#ffd2b0">디스코드 멤버 목소리로 부르는 AI 노래</text>
+  <text x="522" y="262" font-family="-apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Noto Sans CJK KR', sans-serif"
+        font-size="18" fill="#c9bff5" opacity="0.9">녹음 · 학습 · 작곡 · 보컬 변환까지, 전부 슬래시 명령 하나로</text>
+</svg>
