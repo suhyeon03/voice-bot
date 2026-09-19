@@ -87,7 +87,7 @@ flowchart LR
 <summary><b>🎵 노래 만들기</b></summary>
 
 ```
-/노래만들기 장르:K-POP 분위기:신나는 가사:AI가 작성 주제:시험 끝난 날 가수:@수현
+/노래만들기 장르:K-POP 분위기:신나는 가사:AI가 작성 주제:시험 끝난 날 가수:@친구
 ```
 
 | 옵션 | 선택지 |
@@ -228,6 +228,19 @@ voice-bot/
 
 ---
 
+<a name="responsible-use"></a>
+
+## ⚖️ 책임 있는 사용
+
+이 프로젝트는 **본인 또는 명시적으로 동의한 사람의 목소리**로 친구들끼리 즐기기 위해 만들었습니다.
+
+- 동의 없이 다른 사람의 목소리를 학습하거나 흉내 내는 데 사용하지 마세요. 많은 국가에서 퍼블리시티권, 개인정보, 딥페이크 관련 법으로 규제됩니다.
+- 생성한 음원을 실존 인물의 발언이나 노래인 것처럼 속여서 공유하지 마세요.
+- 레퍼런스 곡은 분위기와 스타일을 참고하는 용도입니다. 저작권이 있는 곡을 그대로 복제하거나 상업적으로 이용하지 마세요.
+- 디스코드 [개발자 정책](https://discord.com/developers/docs/policies-and-agreements/developer-policy)에 따라, 음성 채널 녹음 전에는 참여자에게 알리고 동의를 받아야 합니다.
+
+---
+
 ## 🙏 사용한 오픈소스
 
 | 프로젝트 | 역할 | 라이선스 |
@@ -238,6 +251,10 @@ voice-bot/
 | [Demucs](https://github.com/facebookresearch/demucs) | 보컬/반주 분리 | MIT |
 | [librosa](https://github.com/librosa/librosa) · [pyloudnorm](https://github.com/csteinmetz1/pyloudnorm) | 오디오 분석 · 음량 정규화 | ISC · MIT |
 | [FFmpeg](https://ffmpeg.org) | 오디오 변환 · 믹싱 | LGPL/GPL |
+
+## 📄 라이선스
+
+[MIT](LICENSE) — 단, 위의 [책임 있는 사용](#responsible-use) 원칙을 지켜 주세요. 사용한 오픈소스는 각자의 라이선스를 따릅니다.
 
 <div align="center">
 <sub>동의한 목소리로만, 친구들끼리 즐겁게 🎶</sub>
