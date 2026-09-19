@@ -1,4 +1,4 @@
-"""
+""""
 목소리 모델 자동 학습
 
   preprocess.py(녹음 정리) → Applio preprocess → extract → train(+index) → 봇에 연결
@@ -93,8 +93,7 @@ async def applio(step: str, args: list[str], on_line=None) -> str:
     env = {**os.environ, "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
     rc, tail = await stream([str(py), "core.py", *args], music.APPLIO_DIR, on_line, env)
     if rc != 0 or re.search(r"\bfailed\b", tail, re.IGNORECASE):
-        last = "\n".join(tail.splitlines()[-6:])
-        raise TrainError(f"{step} 단계에서 실패했어요.\n```\n{last[-600:]}\n```")
+        raise TrainError(f"{step} 단계에서 실패했어요.\n```\n{music.summarize_log(tail, 600)}\n```")
     return tail
 
 

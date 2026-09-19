@@ -14,6 +14,7 @@
 - /목소리삭제   : 내가 등록한 별도 목소리 삭제
 - /안내 /공지   : (관리자) 봇 소개 패널·공지를 봇 이름으로 게시
 - /도움말       : 사용설명서 (나에게만 보임)
+- /재생 /정지   : 만든 노래를 음성 채널에서 틀기 (완성 메시지의 🔊 버튼으로도 가능)
 ※ /목소리등록에서 '목소리이름'을 적으면 디스코드 멤버가 아닌 별도 목소리로 등록됩니다 (허락 확인 필수)
 - 등록 채널(REGISTER_CHANNEL_ID)에 음성 메시지를 보내면 자동 등록
 
@@ -704,7 +705,8 @@ async def run_song_job(req: music.SongRequest, channel) -> None:
         done += f"\n```\n{preview}\n```"
     await progress(done)
     safe_title = "".join(c for c in (req.title or req.topic or "song") if c.isalnum() or c in " -_")[:40] or "song"
-    await channel.send(file=discord.File(result.mp3, filename=f"{safe_title.strip()}.mp3"))
+    await channel.send(file=discord.File(result.mp3, filename=f"{safe_title.strip()}.mp3"),
+                       view=play_button_view(req.id))
 
 
 def start_song_job(req: music.SongRequest, channel) -> None:
@@ -802,7 +804,7 @@ async def song_cmd(
 @bot.slash_command(name="모델연결", description="Applio에서 학습한 목소리 모델을 멤버에게 연결해요")
 async def link_model_cmd(
     ctx: discord.ApplicationContext,
-    model_name: discord.Option(str, "Applio 학습 때 정한 모델 이름 (예: suhyeon)", name="모델이름"),
+    model_name: discord.Option(str, "Applio 학습 때 정한 모델 이름 (예: my_voice)", name="모델이름"),
     member: discord.Option(discord.Member, "목소리 주인 (기본: 나)", name="멤버", required=False, default=None),
     custom: discord.Option(str, "멤버 대신 별도 목소리에 연결", name="목소리",
                            required=False, default="", autocomplete=voice_autocomplete),
@@ -983,6 +985,154 @@ async def delete_voice_cmd(
 
 
 
+# ---------------- 음성 채널에서 노래 재생 ----------------
+IDLE_LEAVE_SECONDS = 60
+_idle_tasks: dict[int, asyncio.Task] = {}
+
+
+def song_dir(song_id: str) -> Path:
+    return DATA_DIR / "songs" / song_id
+
+
+def song_meta(song_id: str) -> dict:
+    p = song_dir(song_id) / "meta.json"
+    try:
+        return json.loads(p.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def song_title(song_id: str) -> str:
+    m = song_meta(song_id)
+    return m.get("title") or m.get("topic") or "무제"
+
+
+def list_songs() -> list[str]:
+    """완성된 곡 ID (최신순). ID가 시간으로 시작해서 이름순 정렬 = 시간순."""
+    base = DATA_DIR / "songs"
+    if not base.exists():
+        return []
+    return sorted((d.name for d in base.iterdir() if (d / "song.mp3").exists()), reverse=True)
+
+
+def song_choice_label(song_id: str) -> str:
+    m = song_meta(song_id)
+    when = f"{song_id[4:6]}/{song_id[6:8]} {song_id[9:11]}:{song_id[11:13]}" if len(song_id) > 13 else ""
+    singer = "멤버 목소리" if m.get("converted") else "AI 보컬"
+    return f"{song_title(song_id)} · {m.get('genre', '')} · {singer} · {when}"[:100]
+
+
+async def song_autocomplete(ctx: discord.AutocompleteContext):
+    q = (ctx.value or "").lower()
+    out = []
+    for sid in list_songs():
+        label = song_choice_label(sid)
+        if q in label.lower():
+            out.append(discord.OptionChoice(name=label, value=sid))
+        if len(out) == 25:
+            break
+    return out
+
+
+def play_button_view(song_id: str) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="음성 채널에서 듣기", emoji="🔊",
+                                    style=discord.ButtonStyle.primary, custom_id=f"play:{song_id}"))
+    return view
+
+
+async def leave_when_idle(guild_id: int) -> None:
+    await asyncio.sleep(IDLE_LEAVE_SECONDS)
+    guild = bot.get_guild(guild_id)
+    vc = guild.voice_client if guild else None
+    if vc and not vc.is_playing() and guild_id not in sessions:
+        await vc.disconnect(force=True)
+
+
+def schedule_idle_leave(guild_id: int) -> None:
+    old = _idle_tasks.pop(guild_id, None)
+    if old:
+        old.cancel()
+    _idle_tasks[guild_id] = asyncio.create_task(leave_when_idle(guild_id))
+
+
+async def play_song(guild: discord.Guild, member, song_id: str) -> str:
+    voice = getattr(member, "voice", None)
+    if not voice or not voice.channel:
+        return "먼저 음성 채널에 들어간 다음 다시 눌러 주세요."
+    if guild.id in sessions:
+        return "지금 녹음 중이라 재생할 수 없어요. `/녹음종료` 후에 다시 시도해 주세요."
+    path = song_dir(song_id) / "song.mp3"
+    if not path.exists():
+        return "곡 파일을 찾지 못했어요. (삭제됐거나 다른 컴퓨터에서 만든 곡이에요)"
+    if not ensure_opus():
+        return "opus 라이브러리가 없어요. 맥에서 `brew install opus` 후 봇을 재시작해 주세요."
+
+    channel = voice.channel
+    vc = guild.voice_client
+    try:
+        if vc and vc.channel != channel:
+            await vc.move_to(channel)
+        elif not vc:
+            vc = await channel.connect(timeout=20)
+    except Exception as e:
+        log.exception("재생용 음성 채널 접속 실패")
+        return f"음성 채널에 들어가지 못했어요: `{type(e).__name__}`"
+
+    old = _idle_tasks.pop(guild.id, None)
+    if old:
+        old.cancel()
+    if vc.is_playing():
+        vc.stop()
+
+    loop = asyncio.get_running_loop()
+
+    def after(err):
+        if err:
+            log.error("재생 오류: %s", err)
+        loop.call_soon_threadsafe(schedule_idle_leave, guild.id)
+
+    source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(str(path)), volume=0.8)
+    vc.play(source, after=after, signal_type="music", bitrate=128)
+    return f"🔊 {channel.mention}에서 **{song_title(song_id)}** 재생 중이에요. 멈추려면 `/정지`"
+
+
+@bot.listen("on_interaction")
+async def on_play_button(interaction: discord.Interaction):
+    cid = (interaction.data or {}).get("custom_id", "") if interaction.type == discord.InteractionType.component else ""
+    if not cid.startswith("play:"):
+        return
+    await interaction.response.defer(ephemeral=True)
+    msg = await play_song(interaction.guild, interaction.user, cid.split(":", 1)[1])
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bot.slash_command(name="재생", description="만든 노래를 내 음성 채널에서 틀어요")
+async def play_cmd(
+    ctx: discord.ApplicationContext,
+    song: discord.Option(str, "틀 곡 (비워두면 가장 최근 곡)", name="곡",
+                         required=False, default="", autocomplete=song_autocomplete),
+):
+    songs = list_songs()
+    song_id = song or (songs[0] if songs else "")
+    if not song_id:
+        return await ctx.respond("아직 만든 노래가 없어요. `/노래만들기`로 먼저 만들어 보세요!", ephemeral=True)
+    await ctx.defer()
+    await ctx.respond(await play_song(ctx.guild, ctx.author, song_id))
+
+
+@bot.slash_command(name="정지", description="재생 중인 노래를 멈추고 음성 채널에서 나가요")
+async def stop_cmd(ctx: discord.ApplicationContext):
+    vc = ctx.guild.voice_client
+    if not vc:
+        return await ctx.respond("지금 재생 중인 노래가 없어요.", ephemeral=True)
+    if ctx.guild.id in sessions:
+        return await ctx.respond("녹음 중에는 `/녹음종료`로 끝내 주세요.", ephemeral=True)
+    vc.stop()
+    await vc.disconnect(force=True)
+    await ctx.respond("⏹️ 재생을 멈췄어요.")
+
+
 # ---------------- 안내 패널 · 공지 · 도움말 ----------------
 PANEL_COLOR = 0xF5A623
 
@@ -1041,6 +1191,7 @@ def song_guide_embed() -> discord.Embed:
         section("예시",
                 "`/노래만들기 장르:K-POP 분위기:신나는 가사:AI가 작성 주제:시험 끝난 날`\n"
                 "`/노래만들기 장르:발라드 분위기:감성적인 가사:직접 입력 가수:@나`"),
+        section("듣기", "완성 메시지의 **🔊 음성 채널에서 듣기** 버튼, 또는 `/재생` · `/정지`"),
         section("팁", "가수가 남자면 **보컬:남성**을 같이 골라 주면 훨씬 자연스러워요."),
     ]))
     return e

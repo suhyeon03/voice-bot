@@ -112,6 +112,19 @@ async def run(*cmd: str, cwd: Path | None = None, env: dict | None = None) -> tu
     return proc.returncode, out.decode(errors="ignore"), err.decode(errors="ignore")
 
 
+NOISE = re.compile(r"(\d+%\|)|(it/s\])|(s/it\])|resource_tracker|warnings\.warn|leaked semaphore")
+
+
+def summarize_log(text: str, limit: int = 700) -> str:
+    """외부 도구 출력에서 진행 막대·종료 경고를 걸러내고 진짜 에러 부분만 보여준다."""
+    lines = [l.rstrip() for l in re.split(r"[\r\n]+", text) if l.strip() and not NOISE.search(l)]
+    for i in range(len(lines) - 1, -1, -1):          # 마지막 Traceback부터
+        if lines[i].startswith("Traceback"):
+            return "\n".join(lines[i:])[-limit:]
+    keys = [l for l in lines if re.search(r"error|exception|failed|not found|no such", l, re.I)]
+    return "\n".join((keys or lines)[-8:])[-limit:] or "(출력 없음)"
+
+
 def normalize_lyrics(text: str) -> str:
     """구조 태그가 하나도 없으면 [verse]를 붙여 모델이 가사로 인식하게 한다."""
     text = text.strip()
@@ -274,25 +287,45 @@ def link_applio_model(uid: int | str, name: str) -> tuple[Path, Path]:
     return Path(shutil.copy2(pth, dst)), Path(shutil.copy2(idx, dst))
 
 
-async def convert_voice(vocals: Path, pth: Path, index: Path, pitch: int, out: Path) -> None:
+SEGFAULT_CODES = {-11, 139}   # 맥에서 faiss·OpenMP 충돌 시 나는 segmentation fault
+
+
+async def convert_voice(vocals: Path, pth: Path, index: Path, pitch: int, out: Path) -> str:
+    """멤버 목소리로 변환. 반환값은 사용자에게 알릴 참고 문구(없으면 빈 문자열).
+
+    1차: 인덱스 사용 (음색이 더 닮음)
+    2차: 맥에서 인덱스 검색(faiss)이 segfault로 죽으면 인덱스 없이 재시도
+    """
     py = APPLIO_DIR / ".venv" / "bin" / "python"
     if not py.exists():
         raise SongError(f"Applio를 찾지 못했어요. `.env`의 APPLIO_DIR을 확인해 주세요. ({APPLIO_DIR})")
-    rc, o, e = await run(
-        str(py), "core.py", "infer",
-        "--input-path", str(vocals.resolve()),
-        "--output-path", str(out.resolve()),
-        "--pth-path", str(pth.resolve()),
-        "--index-path", str(index.resolve()),
-        "--pitch", str(pitch),
-        "--f0-method", "rmvpe",
-        "--index-rate", "0.5",
-        "--protect", "0.33",
-        "--export-format", "WAV",
-        cwd=APPLIO_DIR,
-    )
-    if rc != 0 or not out.exists():
-        raise SongError(f"목소리 변환에 실패했어요: {(e or o).strip()[-300:]}")
+    # PyTorch와 faiss가 서로 다른 OpenMP를 불러 충돌하는 것을 막음
+    env = {**os.environ, "OMP_NUM_THREADS": "1", "KMP_DUPLICATE_LIB_OK": "TRUE"}
+    logs = []
+    for index_rate in ("0.5", "0"):
+        out.unlink(missing_ok=True)
+        rc, o, e = await run(
+            str(py), "core.py", "infer",
+            "--input-path", str(vocals.resolve()),
+            "--output-path", str(out.resolve()),
+            "--pth-path", str(pth.resolve()),
+            "--index-path", str(index.resolve()),
+            "--index-rate", index_rate,          # 0이면 Applio가 인덱스 검색을 건너뜀
+            "--pitch", str(pitch),
+            "--f0-method", "rmvpe",
+            "--protect", "0.33",
+            "--export-format", "WAV",
+            cwd=APPLIO_DIR, env=env,
+        )
+        logs.append(f"$ index_rate={index_rate} exit={rc}\n--- stdout\n{o}\n--- stderr\n{e}")
+        (out.parent / "convert.log").write_text("\n\n".join(logs), "utf-8")
+        if rc == 0 and out.exists():
+            return "" if index_rate != "0" else "인덱스 없이 변환했어요 (맥 호환성 문제로 자동 전환, 음색이 조금 덜 닮을 수 있어요)."
+        if rc not in SEGFAULT_CODES:
+            break   # segfault가 아닌 실패는 재시도해도 같으므로 중단
+    crashed = "\n(segmentation fault: 프로그램이 C 라이브러리 단계에서 강제 종료됨)" if rc in SEGFAULT_CODES else ""
+    raise SongError(f"목소리 변환에 실패했어요.{crashed}\n```\n{summarize_log(o + chr(10) + e)}\n```\n"
+                    f"전체 로그: `{out.parent / 'convert.log'}`")
 
 
 # ---------------- 4. 믹싱 / 인코딩 ----------------
@@ -336,7 +369,9 @@ async def make_song(req: SongRequest, progress: Progress) -> SongResult:
         vocals, inst = await separate(original, workdir)
         await progress("🎤 목소리를 바꾸는 중...")
         converted_vocals = workdir / "vocals_converted.wav"
-        await convert_voice(vocals, *model, req.pitch, converted_vocals)
+        convert_note = await convert_voice(vocals, *model, req.pitch, converted_vocals)
+        if convert_note:
+            note = (note + " " + convert_note).strip()
         await progress("🎛️ 믹싱 중...")
         await mix(converted_vocals, inst, final)
         converted = True
