@@ -27,6 +27,7 @@ ACESTEP_URL = os.getenv("ACESTEP_URL", "http://127.0.0.1:8001").rstrip("/")
 APPLIO_DIR = Path(os.path.expanduser(os.getenv("APPLIO_DIR", "~/Applio")))
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SONG_TIMEOUT = int(os.getenv("SONG_TIMEOUT_SECONDS", "1200"))
+MAX_COVER_SECONDS = int(os.getenv("MAX_COVER_MINUTES", "7")) * 60
 
 # 디스코드 선택지(한국어) → 모델에 넣을 스타일 태그(영어가 더 잘 먹힘)
 GENRES = {
@@ -92,6 +93,21 @@ class SongRequest:
         if self.extra:
             parts.append(self.extra)
         return ", ".join(p for p in parts if p)
+
+
+@dataclass
+class CoverRequest:
+    requester_id: int
+    singer_key: str
+    singer_label: str
+    source_url: str
+    source_name: str
+    pitch: int = 0
+    id: str = field(default_factory=lambda: time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])
+
+    @property
+    def title(self) -> str:
+        return Path(self.source_name).stem[:60] or "커버"
 
 
 @dataclass
@@ -167,6 +183,39 @@ def build_payload(req: SongRequest) -> dict:
     else:
         payload["lyrics"] = normalize_lyrics(req.lyrics)
     return payload
+
+
+async def download_file(url: str, dest: Path) -> Path:
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url, timeout=aiohttp.ClientTimeout(total=180)) as r:
+            if r.status != 200:
+                raise SongError("파일을 내려받지 못했어요. 다시 첨부해 주세요.")
+            dest.write_bytes(await r.read())
+    return dest
+
+
+async def audio_seconds(path: Path) -> float:
+    rc, out, _ = await run("ffprobe", "-v", "error", "-show_entries", "format=duration",
+                           "-of", "csv=p=0", str(path))
+    try:
+        return float(out.strip())
+    except ValueError:
+        return 0.0
+
+
+async def fit_for_upload(mp3: Path, limit_bytes: int) -> Path | None:
+    """디스코드 업로드 한도를 넘으면 비트레이트를 낮춘 사본을 만든다. 너무 길면 None."""
+    if mp3.stat().st_size <= limit_bytes * 0.95:
+        return mp3
+    seconds = await audio_seconds(mp3)
+    if seconds <= 0:
+        return None
+    kbps = int(limit_bytes * 0.9 * 8 / seconds / 1000)
+    if kbps < 64:
+        return None
+    small = mp3.with_name(mp3.stem + "_upload.mp3")
+    rc, _, _ = await run("ffmpeg", "-y", "-loglevel", "error", "-i", str(mp3), "-b:a", f"{min(kbps, 192)}k", str(small))
+    return small if rc == 0 and small.exists() else None
 
 
 async def download_reference(s: aiohttp.ClientSession, req: SongRequest, workdir: Path) -> Path:
@@ -345,6 +394,43 @@ async def to_mp3(src: Path, out: Path) -> None:
     rc, _, e = await run("ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-b:a", "192k", str(out))
     if rc != 0:
         raise SongError(f"mp3 변환에 실패했어요: {e.strip()[-200:]}")
+
+
+# ---------------- 커버: 실제 음원에 멤버 목소리 입히기 ----------------
+async def make_cover(req: CoverRequest, progress: Progress) -> SongResult:
+    workdir = (DATA_DIR / "songs" / req.id).resolve()
+    workdir.mkdir(parents=True, exist_ok=True)
+    model = singer_model(req.singer_key)
+    if not model:
+        raise SongError("이 가수는 아직 목소리 모델이 없어요. `/모델학습`으로 먼저 만들어 주세요.")
+
+    await progress("📥 음원 받는 중...")
+    ext = Path(req.source_name).suffix.lower() or ".mp3"
+    src = await download_file(req.source_url, workdir / f"source{ext}")
+    seconds = await audio_seconds(src)
+    if seconds <= 0:
+        raise SongError("음원 파일을 읽지 못했어요. mp3, wav, m4a 같은 음악 파일인지 확인해 주세요.")
+    if seconds > MAX_COVER_SECONDS:
+        raise SongError(f"곡이 너무 길어요 ({seconds / 60:.1f}분). {MAX_COVER_SECONDS // 60}분 이하로 잘라서 올려 주세요.")
+
+    original = workdir / "original.wav"
+    rc, _, e = await run("ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-ac", "2", "-ar", "44100", str(original))
+    if rc != 0:
+        raise SongError(f"음원을 변환하지 못했어요: {e.strip()[-200:]}")
+
+    await progress(f"🎚️ 보컬과 반주를 나누는 중... ({seconds / 60:.1f}분 곡, 1~3분 걸려요)")
+    vocals, inst = await separate(original, workdir)
+    await progress("🎤 목소리를 바꾸는 중...")
+    converted_vocals = workdir / "vocals_converted.wav"
+    note = await convert_voice(vocals, *model, req.pitch, converted_vocals)
+    await progress("🎛️ 믹싱 중...")
+    final = workdir / "song.mp3"
+    await mix(converted_vocals, inst, final)
+
+    meta = {**asdict(req), "type": "cover", "title": req.title, "genre": "커버", "converted": True,
+            "duration": round(seconds, 1)}
+    (workdir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
+    return SongResult(final, "", True, note)
 
 
 # ---------------- 전체 파이프라인 ----------------

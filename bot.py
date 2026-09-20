@@ -15,6 +15,7 @@
 - /안내 /공지   : (관리자) 봇 소개 패널·공지를 봇 이름으로 게시
 - /도움말       : 사용설명서 (나에게만 보임)
 - /재생 /정지   : 만든 노래를 음성 채널에서 틀기 (완성 메시지의 🔊 버튼으로도 가능)
+- /커버         : 실제 음원 파일을 멤버 목소리 모델로 덮어 부르기 (AI 커버)
 ※ /목소리등록에서 '목소리이름'을 적으면 디스코드 멤버가 아닌 별도 목소리로 등록됩니다 (허락 확인 필수)
 - 등록 채널(REGISTER_CHANNEL_ID)에 음성 메시지를 보내면 자동 등록
 
@@ -286,16 +287,21 @@ async def register_audio(key: int | str, att: discord.Attachment) -> tuple[float
     return await ingest_raw(key, raw_path, clip_id, f"upload:{att.filename}")
 
 
-async def ingest_pcm(uid: int, pcm: bytes) -> tuple[float, float]:
-    """음성 채널에서 받은 PCM(48kHz, 스테레오, 16bit)을 저장."""
+async def ingest_pcm_file(uid: int, pcm_path: Path) -> tuple[float, float]:
+    """사람별 PCM 파일(48kHz, 스테레오, 16bit)을 wav로 감싸 저장."""
     clip_id = uuid.uuid4().hex[:12]
     raw_path = user_dir(uid) / "raw" / f"{clip_id}.wav"
     raw_path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(raw_path), "wb") as f:
-        f.setnchannels(2)
-        f.setsampwidth(2)
-        f.setframerate(48000)
-        f.writeframes(pcm)
+
+    def wrap():
+        with open(pcm_path, "rb") as src, wave.open(str(raw_path), "wb") as dst:
+            dst.setnchannels(2)
+            dst.setsampwidth(2)
+            dst.setframerate(48000)
+            while chunk := src.read(1 << 20):
+                dst.writeframes(chunk)
+
+    await asyncio.to_thread(wrap)
     return await ingest_raw(uid, raw_path, clip_id, "voice-channel")
 
 
@@ -307,39 +313,64 @@ def progress_text(total: float) -> str:
 
 # ---------------- 음성 채널 녹음 ----------------
 BYTES_PER_SEC = 48000 * 2 * 2  # 48kHz * 스테레오 * 16bit
+REC_DIR = DATA_DIR / "recording"   # 녹음 중인 사람별 파일 (끝나면 정리)
+STATUS_REFRESH = 10
 
 
 class ConsentSink(discord.sinks.Sink):
-    """동의한 사람의 목소리만 사람별로 모으는 Sink.
+    """동의한 사람의 목소리만 사람별 파일에 바로 쓰는 Sink.
 
-    말이 끊긴 구간은 패킷이 오지 않으므로, 0.3초 이상 쉬면 무음을 넣어서
-    전처리 단계에서 문장 단위로 잘 잘리도록 한다.
+    - 메모리에 쌓지 않아서 인원이 많아도 가볍고, 봇이 죽어도 파일이 남는다.
+    - 말이 끊기면 패킷이 오지 않으므로, 0.3초 이상 쉬면 무음을 넣어
+      전처리 단계에서 문장 단위로 잘 잘리게 한다.
     """
     GAP = 0.3
 
-    def __init__(self, allowed: Callable[[int], bool]):
+    def __init__(self, allowed: Callable[[int], bool], folder: Path):
         super().__init__()
         self.allowed = allowed
+        self.folder = folder
+        folder.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._buffers: dict[int, bytearray] = {}
+        self._files: dict[int, object] = {}
+        self._speech: dict[int, int] = {}      # 실제 말한 양 (무음 제외)
         self._last: dict[int, float] = {}
         self._silence = b"\x00" * (int(BYTES_PER_SEC * self.GAP) // 4 * 4)
+        self.closed = False
 
     def write(self, data, user):  # 패킷 라우터 스레드에서 호출됨
         uid = getattr(user, "id", None)
-        if uid is None or not self.allowed(uid):
+        if uid is None or self.closed or not self.allowed(uid):
             return
         pcm = getattr(data, "pcm", data)
         if not pcm:
             return
         now = time.monotonic()
         with self._lock:
-            buf = self._buffers.setdefault(uid, bytearray())
+            if self.closed:
+                return
+            f = self._files.get(uid)
+            if f is None:
+                f = self._files[uid] = open(self.folder / f"{uid}.pcm", "ab")
             last = self._last.get(uid)
             if last is not None and now - last > self.GAP:
-                buf.extend(self._silence)
-            buf.extend(pcm)
+                f.write(self._silence)
+            f.write(pcm)
+            self._speech[uid] = self._speech.get(uid, 0) + len(pcm)
             self._last[uid] = now
+
+    def spoken_seconds(self) -> dict[int, float]:
+        with self._lock:
+            return {u: b / BYTES_PER_SEC for u, b in self._speech.items()}
+
+    def close_all(self) -> dict[int, Path]:
+        with self._lock:
+            self.closed = True
+            for f in self._files.values():
+                f.close()
+            out = {u: self.folder / f"{u}.pcm" for u in self._files}
+            self._files.clear()
+        return out
 
     def cleanup(self):
         self.finished = True  # 파일 포맷팅은 직접 하므로 기본 동작 생략
@@ -347,56 +378,109 @@ class ConsentSink(discord.sinks.Sink):
     def format_audio(self, audio):
         pass
 
-    def pop_all(self) -> dict[int, bytes]:
-        with self._lock:
-            out = {uid: bytes(b) for uid, b in self._buffers.items()}
-            self._buffers.clear()
-            self._last.clear()
-        return out
-
 
 @dataclass
 class Session:
     vc: "discord.VoiceClient"
     sink: ConsentSink
     text_channel: discord.abc.Messageable
+    folder: Path
+    excluded: set[int]
     started: float = field(default_factory=time.monotonic)
     timer: asyncio.Task | None = None
+    updater: asyncio.Task | None = None
+    status_msg: discord.Message | None = None
 
 
 sessions: dict[int, Session] = {}
 
 
 def humans_in(channel) -> list[int]:
-    """음성 채널에 있는 사람 ID (봇 자신 제외). members 권한 없이도 동작."""
+    """음성 채널에 있는 사람 ID (봇 제외). members 권한 없이도 동작."""
+    if channel is None:
+        return []
     me = bot.user.id if bot.user else None
-    return [uid for uid in channel.voice_states.keys() if uid != me]
+    out = []
+    for uid in channel.voice_states.keys():
+        member = channel.guild.get_member(uid)
+        if uid == me or (member is not None and member.bot):
+            continue
+        out.append(uid)
+    return out
 
 
-async def stop_session(guild_id: int) -> list[tuple[int, float | None, float | str]] | None:
-    s = sessions.pop(guild_id, None)
-    if s is None:
-        return None
-    if s.timer and s.timer is not asyncio.current_task():
-        s.timer.cancel()
+def mmss(sec: float) -> str:
+    m, s_ = divmod(int(sec), 60)
+    return f"{m}:{s_:02d}"
+
+
+def save_excluded(s: Session) -> None:
+    atomic_write_json(s.folder / "excluded.json", sorted(s.excluded))
+
+
+def rec_view() -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="나도 참여", emoji="🎙️", style=discord.ButtonStyle.success,
+                                    custom_id="rec:join"))
+    view.add_item(discord.ui.Button(label="이번엔 빼줘", emoji="⏸️", style=discord.ButtonStyle.secondary,
+                                    custom_id="rec:leave"))
+    view.add_item(discord.ui.Button(label="녹음 종료", emoji="⏹️", style=discord.ButtonStyle.danger,
+                                    custom_id="rec:stop"))
+    return view
+
+
+def session_status(s: Session) -> str:
+    channel = s.vc.channel
+    people = humans_in(channel)
+    secs = s.sink.spoken_seconds()
+    ids = list(dict.fromkeys(people + list(secs)))    # 지금 있는 사람 + 이미 녹음된 사람
+    lines, recording = [], 0
+    for uid in ids:
+        here = uid in people
+        if uid in s.excluded:
+            lines.append(f"⏸️ <@{uid}> 이번엔 빠짐")
+        elif store.has_consent(uid):
+            recording += here
+            left = "" if here else " (나감)"
+            lines.append(f"{'🔴' if here else '⚪'} <@{uid}> {mmss(secs.get(uid, 0))}{left}")
+        else:
+            lines.append(f"⬜ <@{uid}> 미동의 — 🎙️ 나도 참여")
+    elapsed = time.monotonic() - s.started
+    remain = max(0, MAX_RECORD_SECONDS - elapsed)
+    dave = " 🔒" if getattr(s.vc, "is_dave_connection", lambda: False)() else ""
+    return (
+        f"🔴 **녹음 중** — {channel.mention if channel else ''}{dave} · 녹음 {recording}명 / 채널 {len(people)}명\n"
+        f"경과 {mmss(elapsed)} · {mmss(remain)} 뒤 자동 종료\n\n"
+        + ("\n".join(lines) or "아직 아무도 없어요")
+        + "\n\n-# 시간은 실제로 말한 시간이에요 · 동의하지 않은 사람의 목소리는 저장되지 않아요"
+    )
+
+
+async def refresh_status(s: Session) -> None:
+    if s.status_msg is None or sessions.get(getattr(s.status_msg.guild, "id", None)) is not s:
+        return
     try:
-        if s.vc.is_recording():
-            s.vc.stop_recording()
-    except Exception:
-        log.exception("stop_recording 실패")
-    await asyncio.sleep(0.5)  # 마지막 패킷 처리 대기
-    buffers = s.sink.pop_all()
-    try:
-        await s.vc.disconnect(force=True)
-    except Exception:
-        log.exception("음성 채널 퇴장 실패")
+        await s.status_msg.edit(content=session_status(s), view=rec_view(), allowed_mentions=NO_PING)
+    except discord.HTTPException:
+        pass
 
+
+async def status_updater(guild_id: int) -> None:
+    while True:
+        await asyncio.sleep(STATUS_REFRESH)
+        s = sessions.get(guild_id)
+        if s is None:
+            return
+        await refresh_status(s)
+
+
+async def save_recordings(files: dict[int, Path], excluded: set[int]) -> list:
     results = []
-    for uid, pcm in buffers.items():
-        if not store.has_consent(uid):  # 녹음 중 /삭제한 경우
+    for uid, path in files.items():
+        if uid in excluded or not store.has_consent(uid):   # 빠지기로 했거나 녹음 중 /삭제
             continue
         try:
-            seconds, total = await ingest_pcm(uid, pcm)
+            seconds, total = await ingest_pcm_file(uid, path)
             results.append((uid, seconds, total))
         except ValueError as e:
             results.append((uid, None, str(e)))
@@ -404,6 +488,54 @@ async def stop_session(guild_id: int) -> list[tuple[int, float | None, float | s
             log.exception("녹음 저장 실패 (uid=%s)", uid)
             results.append((uid, None, f"저장 실패 ({type(e).__name__}) — 원본은 raw 폴더에 보존됨"))
     return results
+
+
+async def stop_session(guild_id: int) -> list[tuple[int, float | None, float | str]] | None:
+    s = sessions.pop(guild_id, None)
+    if s is None:
+        return None
+    for t in (s.timer, s.updater):
+        if t and t is not asyncio.current_task():
+            t.cancel()
+    try:
+        if s.vc.is_recording():
+            s.vc.stop_recording()
+    except Exception:
+        log.exception("stop_recording 실패")
+    await asyncio.sleep(0.5)  # 마지막 패킷 처리 대기
+    files = s.sink.close_all()
+    elapsed = time.monotonic() - s.started
+    try:
+        await s.vc.disconnect(force=True)
+    except Exception:
+        log.exception("음성 채널 퇴장 실패")
+
+    results = await save_recordings(files, s.excluded)
+    shutil.rmtree(s.folder, ignore_errors=True)
+    if s.status_msg:
+        try:
+            await s.status_msg.edit(content=f"⏹️ **녹음이 끝났어요** — 총 {mmss(elapsed)} · {len(results)}명 저장",
+                                    view=None, allowed_mentions=NO_PING)
+        except discord.HTTPException:
+            pass
+    return results
+
+
+async def recover_leftovers() -> None:
+    """봇이 녹음 중에 꺼졌을 때 남은 파일을 저장 (빠지기로 한 사람은 제외)."""
+    if not REC_DIR.exists():
+        return
+    for folder in REC_DIR.iterdir():
+        if not folder.is_dir() or any(s.folder == folder for s in sessions.values()):
+            continue
+        try:
+            excluded = set(json.loads((folder / "excluded.json").read_text("utf-8")))
+        except Exception:
+            excluded = set()
+        files = {int(p.stem): p for p in folder.glob("*.pcm") if p.stem.isdigit()}
+        results = await save_recordings(files, excluded)
+        log.info("중단된 녹음 복구: %s → %d명 저장", folder.name, len([r for r in results if r[1]]))
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def summary(results) -> str:
@@ -508,6 +640,7 @@ async def on_ready():
     if not _panel_registered:
         bot.add_view(HelpPanel())   # 예전에 올린 패널의 버튼도 계속 동작
         _panel_registered = True
+    asyncio.create_task(recover_leftovers())
     opus_ok = ensure_opus()
     log.info("로그인: %s (등록 채널: %s, opus: %s, ffmpeg: %s)", bot.user, REGISTER_CHANNEL_ID or "미설정",
              "OK" if opus_ok else "없음 → brew install opus",
@@ -553,57 +686,93 @@ async def script_cmd(ctx: discord.ApplicationContext):
     await ctx.respond(script_text(), ephemeral=True)
 
 
-@bot.slash_command(name="녹음시작", description="봇이 내 음성 채널에 들어와 녹음을 시작해요 (실험 기능)")
+@bot.slash_command(name="녹음시작", description="봇이 내 음성 채널에 들어와 사람별로 녹음해요 (실험 기능)")
 async def rec_start(ctx: discord.ApplicationContext):
     voice = ctx.author.voice
     if not voice or not voice.channel:
         return await ctx.respond("먼저 음성 채널에 들어간 다음 다시 시도해 주세요.", ephemeral=True)
     if ctx.guild.id in sessions:
-        return await ctx.respond("이미 녹음 중이에요. `/녹음종료`로 먼저 끝내 주세요.", ephemeral=True)
+        return await ctx.respond("이미 녹음 중이에요. 현황판의 ⏹️ 버튼이나 `/녹음종료`로 끝내 주세요.", ephemeral=True)
     if not ensure_opus():
         return await ctx.respond(
             "opus 라이브러리가 없어요. 터미널에서 `brew install opus` 후 봇을 재시작해 주세요.",
             ephemeral=True,
         )
-
     if not has_ffmpeg():
         return await ctx.respond(
             "ffmpeg가 없어서 녹음을 저장할 수 없어요. 터미널에서 `brew install ffmpeg` 후 봇을 재시작해 주세요.",
             ephemeral=True,
         )
 
-    await ctx.defer()
+    await ctx.defer(ephemeral=True)
     channel = voice.channel
+    folder = REC_DIR / f"{ctx.guild.id}-{time.strftime('%Y%m%d-%H%M%S')}"
+    excluded: set[int] = set()
     try:
         vc = ctx.guild.voice_client
         if vc and vc.channel != channel:
             await vc.move_to(channel)
         elif not vc:
             vc = await channel.connect(timeout=20)
-        sink = ConsentSink(store.has_consent)
+        if vc.is_playing():
+            vc.stop()   # 노래 재생 중이었다면 멈추고 녹음
+        sink = ConsentSink(lambda uid: store.has_consent(uid) and uid not in excluded, folder)
         vc.start_recording(sink)
     except Exception as e:
         log.exception("녹음 시작 실패")
         if ctx.guild.voice_client:
             await ctx.guild.voice_client.disconnect(force=True)
-        return await ctx.respond(f"⚠️ 녹음을 시작하지 못했어요: `{type(e).__name__}: {e}`")
+        shutil.rmtree(folder, ignore_errors=True)
+        return await ctx.respond(f"⚠️ 녹음을 시작하지 못했어요: `{type(e).__name__}: {e}`", ephemeral=True)
 
-    session = Session(vc=vc, sink=sink, text_channel=ctx.channel)
-    session.timer = asyncio.create_task(auto_stop(ctx.guild.id))
+    session = Session(vc=vc, sink=sink, text_channel=ctx.channel, folder=folder, excluded=excluded)
+    save_excluded(session)
     sessions[ctx.guild.id] = session
+    session.status_msg = await ctx.channel.send(session_status(session), view=rec_view(), allowed_mentions=NO_PING)
+    session.timer = asyncio.create_task(auto_stop(ctx.guild.id))
+    session.updater = asyncio.create_task(status_updater(ctx.guild.id))
+    await ctx.respond("🔴 녹음을 시작했어요! 채널의 현황판에서 참여 상태를 볼 수 있어요.", ephemeral=True)
 
-    people = humans_in(channel)
-    yes = [f"<@{u}>" for u in people if store.has_consent(u)]
-    no = [f"<@{u}>" for u in people if not store.has_consent(u)]
-    dave = "🔒 E2EE" if getattr(vc, "is_dave_connection", lambda: False)() else ""
-    msg = (
-        f"🔴 **녹음 시작** — {channel.mention} {dave}\n"
-        f"최대 {MAX_RECORD_SECONDS // 60}분 뒤 자동 종료, 끝낼 땐 `/녹음종료`\n"
-        f"저장 대상: {', '.join(yes) or '없음'}\n"
-    )
-    if no:
-        msg += f"저장 안 함 (미동의): {', '.join(no)} — 원하면 `/동의` 후 참여할 수 있어요."
-    await ctx.respond(msg, allowed_mentions=NO_PING)
+
+@bot.listen("on_interaction")
+async def on_rec_button(interaction: discord.Interaction):
+    cid = (interaction.data or {}).get("custom_id", "") if interaction.type == discord.InteractionType.component else ""
+    if not cid.startswith("rec:"):
+        return
+    s = sessions.get(interaction.guild_id)
+    if s is None:
+        return await interaction.response.send_message("지금은 녹음 중이 아니에요.", ephemeral=True)
+    user = interaction.user
+    action = cid.split(":", 1)[1]
+    in_channel = user.id in humans_in(s.vc.channel)
+
+    if action == "join":
+        changed = user.id in s.excluded
+        s.excluded.discard(user.id)
+        if changed:
+            save_excluded(s)
+        if store.has_consent(user.id):
+            msg = "🔴 참여 중이에요! 말하는 대로 바로 저장돼요." if in_channel else "음성 채널에 들어오면 바로 저장돼요."
+            await interaction.response.send_message(msg, ephemeral=True)
+        else:
+            text, view = consent_prompt(user)
+            await interaction.response.send_message(
+                text + "\n\n동의하면 **지금부터** 바로 녹음돼요.", view=view, ephemeral=True)
+    elif action == "leave":
+        s.excluded.add(user.id)
+        save_excluded(s)
+        await interaction.response.send_message(
+            "⏸️ 이번 녹음에서 빠졌어요. 이번 녹음의 내 목소리는 저장하지 않아요.\n"
+            "다시 참여하려면 🎙️ 나도 참여를 누르세요. (동의는 그대로 유지돼요)", ephemeral=True)
+    elif action == "stop":
+        is_admin = getattr(getattr(user, "guild_permissions", None), "manage_guild", False)
+        if not in_channel and not is_admin:
+            return await interaction.response.send_message("음성 채널에 있는 사람만 녹음을 끝낼 수 있어요.", ephemeral=True)
+        await interaction.response.defer()
+        results = await stop_session(interaction.guild_id)
+        return await interaction.followup.send(f"⏹️ **녹음 종료** ({user.mention})\n{summary(results)}",
+                                               allowed_mentions=NO_PING)
+    await refresh_status(s)
 
 
 @bot.slash_command(name="녹음종료", description="녹음을 끝내고 사람별로 저장해요")
@@ -617,12 +786,14 @@ async def rec_stop(ctx: discord.ApplicationContext):
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before, after):
-    """녹음 중인 채널에 사람이 아무도 안 남으면 자동 종료."""
+    """녹음 채널에 누가 들어오거나 나가면 현황판 갱신, 아무도 없으면 자동 종료."""
     s = sessions.get(member.guild.id)
-    if s is None or not s.vc.channel or before.channel != s.vc.channel:
+    if s is None or not s.vc.channel:
+        return
+    if s.vc.channel not in (before.channel, after.channel) or member.id == getattr(bot.user, "id", None):
         return
     if humans_in(s.vc.channel):
-        return
+        return await refresh_status(s)
     results = await stop_session(member.guild.id)
     await s.text_channel.send(
         f"⏹️ 음성 채널이 비어서 녹음을 종료했어요.\n{summary(results)}",
@@ -704,9 +875,53 @@ async def run_song_job(req: music.SongRequest, channel) -> None:
         preview = lyrics if len(lyrics) <= 1200 else lyrics[:1200] + "\n…"
         done += f"\n```\n{preview}\n```"
     await progress(done)
-    safe_title = "".join(c for c in (req.title or req.topic or "song") if c.isalnum() or c in " -_")[:40] or "song"
-    await channel.send(file=discord.File(result.mp3, filename=f"{safe_title.strip()}.mp3"),
-                       view=play_button_view(req.id))
+    await send_song_file(channel, result.mp3, req.title or req.topic or "song", req.id)
+
+
+async def send_song_file(channel, mp3: Path, title: str, song_id: str) -> None:
+    """서버 업로드 한도(보통 10MB)에 맞춰 올린다. 넘으면 음질을 낮춘 사본, 그래도 안 되면 재생 버튼만."""
+    limit = getattr(getattr(channel, "guild", None), "filesize_limit", 10 * 1024 * 1024)
+    upload = await music.fit_for_upload(mp3, limit)
+    view = play_button_view(song_id)
+    if upload is None:
+        return await channel.send("📦 파일이 너무 커서 채널에 올리지 못했어요. 🔊 버튼으로 음성 채널에서 들을 수 있어요.",
+                                  view=view)
+    safe = "".join(c for c in title if c.isalnum() or c in " -_")[:40].strip() or "song"
+    note = "-# 서버 업로드 한도에 맞춰 음질을 조금 낮췄어요 · 원본은 🔊 버튼으로 들을 수 있어요" if upload != mp3 else None
+    await channel.send(content=note, file=discord.File(upload, filename=f"{safe}.mp3"), view=view)
+
+
+async def run_cover_job(req: music.CoverRequest, channel) -> None:
+    global gpu_waiting
+    header = f"🎤 **AI 커버** — {req.title}\n가수: {req.singer_label} | 요청: <@{req.requester_id}>"
+    ahead = gpu_waiting + (1 if gpu_lock.locked() else 0)
+    status = await channel.send(
+        f"{header}\n⏳ " + (f"앞에 {ahead}개 작업이 대기 중이에요." if ahead else "곧 시작해요."),
+        allowed_mentions=NO_PING,
+    )
+
+    async def progress(text: str) -> None:
+        try:
+            await status.edit(content=f"{header}\n{text}", allowed_mentions=NO_PING)
+        except discord.HTTPException:
+            pass
+
+    gpu_waiting += 1
+    async with gpu_lock:
+        gpu_waiting -= 1
+        try:
+            result = await music.make_cover(req, progress)
+        except music.SongError as e:
+            return await progress(f"⚠️ {e}")
+        except Exception as e:
+            log.exception("커버 실패")
+            return await progress(f"⚠️ 예상치 못한 오류: `{type(e).__name__}: {e}`")
+
+    done = "✅ 완성! 목소리를 입혔어요."
+    if result.note:
+        done += f"\nℹ️ {result.note}"
+    await progress(done)
+    await send_song_file(channel, result.mp3, f"{req.title} (커버)", req.id)
 
 
 def start_song_job(req: music.SongRequest, channel) -> None:
@@ -799,6 +1014,45 @@ async def song_cmd(
 
     await ctx.respond("🎵 접수했어요! 채널에 진행 상황을 올릴게요.", ephemeral=True)
     start_song_job(req, ctx.channel)
+
+
+@bot.slash_command(name="커버", description="실제 음원 파일을 멤버 목소리로 바꿔 불러요 (AI 커버)")
+async def cover_cmd(
+    ctx: discord.ApplicationContext,
+    source: discord.Option(discord.Attachment, "커버할 음원 파일 (mp3, wav, m4a 등)", name="음원"),
+    singer: discord.Option(discord.Member, "이 멤버 목소리로 (기본: 나)", name="가수",
+                           required=False, default=None),
+    custom: discord.Option(str, "멤버 대신 별도 목소리로", name="목소리",
+                           required=False, default="", autocomplete=voice_autocomplete),
+    pitch: discord.Option(int, "키 조절 (여자 노래→남자 목소리 -12, 반대 +12)", name="키조절",
+                          min_value=-12, max_value=12, required=False, default=0),
+):
+    if singer and custom.strip():
+        return await ctx.respond("가수(멤버)와 목소리 중 하나만 골라 주세요.", ephemeral=True)
+    if custom.strip():
+        key = store.find_custom(custom)
+        if not key:
+            return await ctx.respond(f"`{custom}` 목소리가 없어요. `/가수목록`에서 이름을 확인해 주세요.", ephemeral=True)
+        label = store.label(key)
+    else:
+        target = singer or ctx.author
+        key, label = str(target.id), target.mention
+    if not store.has_consent(key):
+        who = "먼저 `/동의`를 해 주세요." if key == str(ctx.author.id) else "이 멤버는 목소리 사용에 동의하지 않았어요."
+        return await ctx.respond(who, ephemeral=True)
+    if not music.singer_model(key):
+        return await ctx.respond(
+            f"{label}의 목소리 모델이 아직 없어요. 녹음을 모은 뒤 `/모델학습`으로 먼저 만들어 주세요.",
+            ephemeral=True, allowed_mentions=NO_PING)
+    if not is_audio(source) or source.size > MAX_BYTES:
+        return await ctx.respond("25MB 이하의 음악 파일(mp3, wav, m4a 등)만 커버할 수 있어요.", ephemeral=True)
+
+    req = music.CoverRequest(requester_id=ctx.author.id, singer_key=key, singer_label=label,
+                             source_url=source.url, source_name=source.filename, pitch=pitch)
+    await ctx.respond("🎤 접수했어요! 채널에 진행 상황을 올릴게요.", ephemeral=True)
+    task = asyncio.create_task(run_cover_job(req, ctx.channel))
+    _song_tasks.add(task)
+    task.add_done_callback(_song_tasks.discard)
 
 
 @bot.slash_command(name="모델연결", description="Applio에서 학습한 목소리 모델을 멤버에게 연결해요")
@@ -1170,7 +1424,8 @@ def guide_embed() -> discord.Embed:
     e = discord.Embed(title="📖 사용설명서", color=PANEL_COLOR, description="\n".join([
         section("1️⃣ 동의하기", "`/동의` — 목소리 사용에 동의해야 녹음·학습이 돼요."),
         section("2️⃣ 목소리 모으기",
-                "음성 채널에서 `/녹음시작` → 5~10분 수다 떨기 → `/녹음종료`\n"
+                "음성 채널에서 `/녹음시작` → 현황판의 🎙️ **나도 참여** → 5~10분 수다 떨기 → ⏹️ 종료\n"
+                "여러 명이 함께 있어도 **사람별로 따로** 저장돼요. 빠지고 싶으면 ⏸️ **이번엔 빼줘**\n"
                 "`/대본`의 문장을 읽거나, 폰에서 음성 메시지·`/목소리등록`으로 올려도 돼요."),
         section("3️⃣ 목소리 모델 만들기", "`/모델학습` — 녹음 3분 이상이면 가능 (10분 이상 권장, 수십 분 걸려요)"),
         section("4️⃣ 노래 만들기", "`/노래만들기` — 장르·분위기·가사를 고르고 **가수**에 나를 선택!"),
@@ -1192,6 +1447,8 @@ def song_guide_embed() -> discord.Embed:
                 "`/노래만들기 장르:K-POP 분위기:신나는 가사:AI가 작성 주제:시험 끝난 날`\n"
                 "`/노래만들기 장르:발라드 분위기:감성적인 가사:직접 입력 가수:@나`"),
         section("듣기", "완성 메시지의 **🔊 음성 채널에서 듣기** 버튼, 또는 `/재생` · `/정지`"),
+        section("AI 커버", "`/커버 음원:(음악 파일)` — 실제 노래의 보컬을 내 목소리로 바꿔 불러요\n"
+                "여자 노래를 남자 목소리로 부를 땐 **키조절:-12**"),
         section("팁", "가수가 남자면 **보컬:남성**을 같이 골라 주면 훨씬 자연스러워요."),
     ]))
     return e
